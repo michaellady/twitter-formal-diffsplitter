@@ -24,7 +24,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use rand::Rng;
 
-use crate::{dashboard, db, diff, metrics, State};
+use crate::{alerting, dashboard, db, diff, metrics, State};
 
 pub fn router(state: Arc<State>) -> Router {
     Router::new()
@@ -274,7 +274,7 @@ async fn diff_read(
         .inc();
     let p_truncated = truncate(&p_text, state.cfg.diff_body_max_bytes);
     let s_truncated = truncate(&s_text, state.cfg.diff_body_max_bytes);
-    if let Err(e) = db::record_diff(
+    let diff_id = match db::record_diff(
         &state.pool,
         method.as_str(),
         &path_only,
@@ -286,7 +286,42 @@ async fn diff_read(
         outcome.severity.as_str(),
         None,
     ) {
-        tracing::warn!(error=%e, "failed to persist diff");
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(error=%e, "failed to persist diff");
+            None
+        }
+    };
+
+    // Phase 3: alerting. Only critical severity fires notifiers, and only
+    // when we successfully claim the row's `notified_at_ns` (atomic single-
+    // statement UPDATE WHERE notified_at_ns IS NULL — survives restart and
+    // concurrent claimers). Notifier failures never affect the request path
+    // because diff_read itself runs on a tokio::spawn detached from the
+    // client response.
+    if outcome.severity == diff::Severity::Critical {
+        if let Some(id) = diff_id {
+            match db::claim_for_notification(&state.pool, id) {
+                Ok(true) => {
+                    let alert = alerting::AlertDiff {
+                        diff_id: id,
+                        severity: outcome.severity.as_str().to_string(),
+                        request_path: path_only.clone(),
+                        method: method.as_str().to_string(),
+                        primary_status: Some(primary_status),
+                        shadow_status: Some(s_status),
+                        observed_at_ns: db::now_ns(),
+                    };
+                    state.notifiers.fire(&alert).await;
+                }
+                Ok(false) => {
+                    tracing::debug!(diff_id = id, "diff already notified; skipping");
+                }
+                Err(e) => {
+                    tracing::warn!(error=%e, diff_id=id, "claim_for_notification failed");
+                }
+            }
+        }
     }
 }
 

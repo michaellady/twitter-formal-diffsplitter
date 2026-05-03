@@ -10,15 +10,20 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use diffsplitter::config::Config;
-use diffsplitter::{dashboard, db, State};
+use diffsplitter::{alerting, dashboard, db, State};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 fn tmp_db_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     let mut p = std::env::temp_dir();
     p.push(format!(
-        "diffsplitter-test-{}-{}.db",
+        "diffsplitter-test-{}-{:?}-{}-{}.db",
         std::process::id(),
+        std::thread::current().id(),
+        seq,
         rand_suffix()
     ));
     p
@@ -50,7 +55,15 @@ fn fresh_state() -> Arc<State> {
         diff_body_max_bytes: 4096,
     };
     let http = reqwest::Client::builder().build().expect("reqwest client");
-    Arc::new(State { cfg, http, pool })
+    let notifiers = Arc::new(alerting::NotifierSet {
+        notifiers: vec![Arc::new(alerting::LogNotifier)],
+    });
+    Arc::new(State {
+        cfg,
+        http,
+        pool,
+        notifiers,
+    })
 }
 
 fn router(state: Arc<State>) -> axum::Router {

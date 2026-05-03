@@ -11,6 +11,31 @@ The `tier4-bootstrap-check` CI gate enforces this.
 
 ### Added
 
+- Stream 2 Phase 3: critical-diff alerting. New module
+  `crates/diffsplitter/src/alerting.rs` defines a `Notifier` trait with
+  three impls: `LogNotifier` (always on; structured `tracing::warn!` to
+  stderr — the no-op fallback so operators see critical diffs even with
+  no external sink), `WebhookNotifier` (generic JSON POST — works with
+  Slack incoming webhooks, Discord, ntfy.sh, custom bridges), and
+  `GitHubPRCommentNotifier` (POSTs a markdown summary to the GitHub
+  Issues comments API for a tracked PR). `NotifierSet::fire` fans out
+  concurrently via `futures_util::join_all`; individual notifier failures
+  are logged but never block the request path or the diff record itself.
+  The proxy fires only on `severity == "critical"` after successfully
+  claiming the row via `db::claim_for_notification`, an atomic
+  single-statement `UPDATE diffs SET notified_at_ns = now WHERE id = ?
+  AND notified_at_ns IS NULL` so two proxy instances or a
+  crash-and-restart cannot double-fire. Configuration via env vars:
+  `ALERT_WEBHOOK_URL` enables the webhook; `ALERT_GH_REPO` +
+  `ALERT_GH_PR` + `ALERT_GH_TOKEN` (all three required) enable the PR
+  commenter. Schema migration adds `diffs.notified_at_ns INTEGER`
+  idempotently via a `PRAGMA table_info` sniff (no DROP, no rebuild).
+  New runtime deps: `async-trait`, `futures-util` (no-default-features);
+  `httpmock` as a dev-dep only. Six new tests in `tests/alerting.rs`
+  cover the webhook JSON shape (verified against an in-process httpmock
+  with `json_body_partial`), non-2xx error propagation, fan-out failure
+  isolation, the single-shot claim contract, the end-to-end
+  insert-then-fire path, and a payload-shape regression guard.
 - Stream 2 Phase 2: server-rendered diffs dashboard. New module
   `crates/diffsplitter/src/dashboard.rs` mounts three routes on the existing
   axum router: `GET /diffs` (HTML — last 100 diffs sorted by

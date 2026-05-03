@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use diffsplitter::{config::Config, db, metrics, proxy, worker};
+use diffsplitter::{alerting, config::Config, db, metrics, proxy, worker};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -45,10 +45,19 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .context("building reqwest client")?;
 
+    // Phase 3: build the alerting fan-out from env vars. LogNotifier is
+    // always present; webhook + GitHub PR comment are opt-in.
+    let notifiers = Arc::new(alerting::NotifierSet::from_env());
+    tracing::info!(
+        notifier_count = notifiers.notifiers.len(),
+        "alerting initialized"
+    );
+
     let state = Arc::new(diffsplitter::State {
         cfg: cfg.clone(),
         http,
         pool: pool.clone(),
+        notifiers,
     });
 
     // Background: drains write_queue and replays POSTs at the shadow.
