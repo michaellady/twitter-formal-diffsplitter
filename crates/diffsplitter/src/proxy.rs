@@ -24,7 +24,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use rand::Rng;
 
-use crate::{alerting, dashboard, db, diff, metrics, State};
+use crate::{alerting, dashboard, db, diff, metrics, scoreboard, State};
 
 pub fn router(state: Arc<State>) -> Router {
     Router::new()
@@ -39,6 +39,8 @@ pub fn router(state: Arc<State>) -> Router {
         // Phase 2 dashboard: GET /diffs (HTML), /diffs/:id (HTML),
         // /diffs.json (JSON, supersedes the old handler in this file).
         .merge(dashboard::routes())
+        // Phase 4 scoreboard: GET /scoreboard (HTML), /scoreboard.json.
+        .merge(scoreboard::routes())
         .fallback(any(proxy_handler))
         .with_state(state)
 }

@@ -36,6 +36,34 @@ The `tier4-bootstrap-check` CI gate enforces this.
   with `json_body_partial`), non-2xx error propagation, fan-out failure
   isolation, the single-shot claim contract, the end-to-end
   insert-then-fire path, and a payload-shape regression guard.
+- Stream 2 Phase 4: cross-impl conformance scoreboard. New module
+  `crates/diffsplitter/src/scoreboard.rs` mounts two routes on the existing
+  axum router via the same `merge` helper used by the dashboard:
+  `GET /scoreboard` (server-rendered HTML) and `GET /scoreboard.json`
+  (same data, JSON shape). The page answers the topline question "are the
+  two impls staying converged or diverging?" with: a counts panel (total
+  requests, total diffs, divergence rate over 1h / 24h / 7d), an inline-SVG
+  severity bar chart over the 24h window (no JS, no external assets), a
+  top-10 diverging-paths leaderboard sorted by diff count, and a pointer
+  to the last critical diff (with a link back to the dashboard). When the
+  shadow is currently `degraded` (K13) the page renders a yellow banner
+  and greys out the rate cards — the rate is meaningless while writes are
+  being silently dropped. The "requests" denominator is best-effort: there
+  is no per-request audit row (proxy only emits Prometheus counters, which
+  reset on restart), so we approximate it as
+  `diffs + queued-writes + failed-writes`. This undercounts non-diverging
+  reads and slightly overstates the rate; the tradeoff is documented in
+  `db::requests_in_window` and called out in the page footer. Conservative
+  by design (overstates rather than hides). New helpers in `db.rs` keep
+  the scoreboard out of the proxy hot path: `diffs_in_window`,
+  `requests_in_window`, `diffs_total`, `severity_breakdown`,
+  `top_diverging_paths`, `last_critical_diff`, `shadow_degraded_now`.
+  Pure server-rendered HTML; typical render ≈ 4-10KB, well under the 50KB
+  budget enforced by an integration test (`tests/scoreboard.rs`). Five
+  integration tests cover: HTML renders 200 with all required sections,
+  JSON round-trips through SQLite, rolling-window math buckets diffs into
+  the right windows on a seeded DB, an empty DB returns sensible zeros,
+  and the K13 degraded banner appears when shadow state is `degraded`.
 - Stream 2 Phase 2: server-rendered diffs dashboard. New module
   `crates/diffsplitter/src/dashboard.rs` mounts three routes on the existing
   axum router: `GET /diffs` (HTML — last 100 diffs sorted by

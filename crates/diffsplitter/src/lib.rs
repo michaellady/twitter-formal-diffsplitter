@@ -10,6 +10,7 @@ pub mod db;
 pub mod diff;
 pub mod metrics;
 pub mod proxy;
+pub mod scoreboard;
 pub mod worker;
 
 use std::sync::Arc;
