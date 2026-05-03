@@ -87,7 +87,38 @@ pub fn migrate(pool: &DbPool) -> Result<()> {
             VALUES ('primary', 'seeded', 0), ('shadow', 'seeded', 0);
         "#,
     )?;
+    // Phase 3 alerting: track when (and only when) we've fired a notification
+    // for a given diff. NULL == not yet notified. Idempotent ALTER: SQLite
+    // doesn't support IF NOT EXISTS on ALTER TABLE ADD COLUMN until 3.35,
+    // but we don't need it — we sniff the column list first.
+    let has_notified_at: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(diffs)")?;
+        let cols = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        cols.iter().any(|c| c == "notified_at_ns")
+    };
+    if !has_notified_at {
+        conn.execute_batch("ALTER TABLE diffs ADD COLUMN notified_at_ns INTEGER")?;
+    }
     Ok(())
+}
+
+/// Atomically claim a diff for notification. Returns `true` exactly once
+/// per row across the lifetime of the database — the second call (or a
+/// concurrent caller racing the first) sees the row already non-NULL and
+/// returns `false`. Uses a single conditional UPDATE so the SQLite writer
+/// lock is the serialization point.
+pub fn claim_for_notification(pool: &DbPool, diff_id: i64) -> Result<bool> {
+    let now = now_ns();
+    let conn = pool.lock();
+    let updated = conn.execute(
+        "UPDATE diffs
+            SET notified_at_ns = ?2
+          WHERE id = ?1 AND notified_at_ns IS NULL",
+        params![diff_id, now],
+    )?;
+    Ok(updated == 1)
 }
 
 pub fn enqueue_write(

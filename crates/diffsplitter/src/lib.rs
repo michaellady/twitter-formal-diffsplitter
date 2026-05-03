@@ -3,6 +3,7 @@
 //! The library form is exported so `tests/` can build against the same modules
 //! the binary uses.
 
+pub mod alerting;
 pub mod config;
 pub mod dashboard;
 pub mod db;
@@ -26,4 +27,7 @@ pub struct State {
     pub cfg: config::Config,
     pub http: reqwest::Client,
     pub pool: DbPool,
+    /// Phase 3 alerting fan-out. Always populated (LogNotifier is
+    /// unconditional); additional notifiers come from env vars at startup.
+    pub notifiers: Arc<alerting::NotifierSet>,
 }
