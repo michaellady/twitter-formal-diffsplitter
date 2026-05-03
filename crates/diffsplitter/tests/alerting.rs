@@ -47,12 +47,14 @@ fn sample_diff(id: i64) -> AlertDiff {
 #[tokio::test]
 async fn webhook_notifier_posts_expected_json_shape() {
     let server = MockServer::start_async().await;
-    let mock = server.mock_async(|when, then| {
-        when.method(POST)
-            .path("/hook")
-            .header("content-type", "application/json");
-        then.status(200).body("ok");
-    }).await;
+    let mock = server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/hook")
+                .header("content-type", "application/json");
+            then.status(200).body("ok");
+        })
+        .await;
 
     let url = server.url("/hook");
     let n = WebhookNotifier::new(url);
@@ -67,10 +69,12 @@ async fn webhook_notifier_posts_expected_json_shape() {
 
     // Re-fetch the request body via a second mock that captures it.
     let server2 = MockServer::start_async().await;
-    let captured = server2.mock_async(|when, then| {
-        when.method(POST).path("/cap");
-        then.status(200);
-    }).await;
+    let captured = server2
+        .mock_async(|when, then| {
+            when.method(POST).path("/cap");
+            then.status(200);
+        })
+        .await;
     let n2 = WebhookNotifier::new(server2.url("/cap"));
     n2.notify(&diff).await.expect("second notify ok");
     let history = captured.hits_async().await;
@@ -96,10 +100,12 @@ async fn webhook_notifier_posts_expected_json_shape() {
 #[tokio::test]
 async fn webhook_notifier_propagates_non_2xx_as_error() {
     let server = MockServer::start_async().await;
-    let _mock = server.mock_async(|when, then| {
-        when.method(POST).path("/fail");
-        then.status(503).body("upstream busy");
-    }).await;
+    let _mock = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/fail");
+            then.status(503).body("upstream busy");
+        })
+        .await;
 
     let n = WebhookNotifier::new(server.url("/fail"));
     let err = n.notify(&sample_diff(1)).await.expect_err("should error");
@@ -112,10 +118,12 @@ async fn notifier_set_fan_out_does_not_propagate_individual_failures() {
     // Failing webhook + always-on log notifier — fire() must not panic
     // and must not return Result::Err (it returns ()).
     let server = MockServer::start_async().await;
-    let _mock = server.mock_async(|when, then| {
-        when.method(POST).path("/fail");
-        then.status(500);
-    }).await;
+    let _mock = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/fail");
+            then.status(500);
+        })
+        .await;
 
     let mut set = NotifierSet {
         notifiers: vec![Arc::new(diffsplitter::alerting::LogNotifier)],
@@ -134,9 +142,18 @@ async fn claim_for_notification_is_single_shot() {
 
     // Insert a critical diff.
     let id = db::record_diff(
-        &pool, "GET", "/x", Some(200), Some(500),
-        Some("a"), Some("b"), "diff", "critical", None,
-    ).expect("record");
+        &pool,
+        "GET",
+        "/x",
+        Some(200),
+        Some(500),
+        Some("a"),
+        Some("b"),
+        "diff",
+        "critical",
+        None,
+    )
+    .expect("record");
 
     let first = db::claim_for_notification(&pool, id).expect("claim 1");
     let second = db::claim_for_notification(&pool, id).expect("claim 2");

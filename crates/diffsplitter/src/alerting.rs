@@ -188,7 +188,13 @@ impl Notifier for GitHubPRCommentNotifier {
             .await?;
         let status = resp.status();
         if !status.is_success() {
-            let snippet: String = resp.text().await.unwrap_or_default().chars().take(200).collect();
+            let snippet: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect();
             anyhow::bail!("github api returned {status}: {snippet}");
         }
         Ok(())
@@ -305,11 +311,7 @@ mod tests {
 
     #[test]
     fn gh_comment_url_shape() {
-        let n = GitHubPRCommentNotifier::new(
-            "owner/repo".to_string(),
-            7,
-            "ghp_test".to_string(),
-        );
+        let n = GitHubPRCommentNotifier::new("owner/repo".to_string(), 7, "ghp_test".to_string());
         assert_eq!(
             n.comment_url(),
             "https://api.github.com/repos/owner/repo/issues/7/comments"
