@@ -435,6 +435,166 @@ pub fn upsert_backend_state(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Scoreboard aggregation queries (Phase 4).
+//
+// Read-only helpers used by `scoreboard.rs` to build the rolling conformance
+// summary. All counts are point-in-time snapshots over the `diffs` table; the
+// "requests" denominator is best-effort — see `requests_in_window` notes.
+
+/// Number of diffs observed in the half-open interval `[since_ns, +inf)`,
+/// optionally restricted to a specific severity.
+pub fn diffs_in_window(pool: &DbPool, since_ns: i64, severity: Option<&str>) -> Result<i64> {
+    let conn = pool.lock();
+    let n: i64 = match severity {
+        Some(s) => conn.query_row(
+            "SELECT COUNT(*) FROM diffs WHERE observed_at_ns >= ?1 AND severity = ?2",
+            params![since_ns, s],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT COUNT(*) FROM diffs WHERE observed_at_ns >= ?1",
+            params![since_ns],
+            |r| r.get(0),
+        )?,
+    };
+    Ok(n)
+}
+
+/// Best-effort request-count denominator for the divergence-rate calculation.
+///
+/// **Tradeoff (per the Phase 4 brief):** the proxy does not persist a
+/// per-request audit row (only Prometheus counters, which reset on restart).
+/// We therefore approximate "requests in the window" as
+/// `diffs-in-window + writes-enqueued-in-window + writes-failed-in-window`.
+/// This undercounts reads that did not diverge — but the resulting *rate*
+/// (`diffs / requests`) is conservative: it overstates divergence rather than
+/// hiding it. The dashboard is for triage, not SLA accounting; the
+/// approximation is good enough until/unless we add a `requests` table.
+pub fn requests_in_window(pool: &DbPool, since_ns: i64) -> Result<i64> {
+    let conn = pool.lock();
+    let diffs: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM diffs WHERE observed_at_ns >= ?1",
+        params![since_ns],
+        |r| r.get(0),
+    )?;
+    let queued: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM write_queue WHERE enqueued_at_ns >= ?1",
+        params![since_ns],
+        |r| r.get(0),
+    )?;
+    let failed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM failed_writes WHERE enqueued_at_ns >= ?1",
+        params![since_ns],
+        |r| r.get(0),
+    )?;
+    Ok(diffs + queued + failed)
+}
+
+/// Total diffs ever recorded.
+pub fn diffs_total(pool: &DbPool) -> Result<i64> {
+    let conn = pool.lock();
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM diffs", [], |r| r.get(0))?;
+    Ok(n)
+}
+
+/// Severity breakdown over the half-open window `[since_ns, +inf)`.
+/// Returns counts in canonical order: critical, high, medium, low, noise.
+pub fn severity_breakdown(pool: &DbPool, since_ns: i64) -> Result<[(String, i64); 5]> {
+    let conn = pool.lock();
+    let mut out: [(String, i64); 5] = [
+        ("critical".into(), 0),
+        ("high".into(), 0),
+        ("medium".into(), 0),
+        ("low".into(), 0),
+        ("noise".into(), 0),
+    ];
+    let mut stmt = conn.prepare(
+        "SELECT severity, COUNT(*) FROM diffs
+          WHERE observed_at_ns >= ?1
+          GROUP BY severity",
+    )?;
+    let rows = stmt.query_map(params![since_ns], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (sev, n) = row?;
+        if let Some(slot) = out.iter_mut().find(|(s, _)| *s == sev) {
+            slot.1 = n;
+        }
+    }
+    Ok(out)
+}
+
+/// Top-N paths by diff count (descending) over the window. Each entry is
+/// `(path, diff_count, request_count_for_path)`.
+pub fn top_diverging_paths(
+    pool: &DbPool,
+    since_ns: i64,
+    limit: i64,
+) -> Result<Vec<(String, i64, i64)>> {
+    let conn = pool.lock();
+    let mut stmt = conn.prepare(
+        "SELECT path, COUNT(*) AS n
+           FROM diffs
+          WHERE observed_at_ns >= ?1
+          GROUP BY path
+          ORDER BY n DESC
+          LIMIT ?2",
+    )?;
+    let mut out: Vec<(String, i64, i64)> = stmt
+        .query_map(params![since_ns, limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|(path, diffs)| (path, diffs, 0))
+        .collect();
+    for entry in out.iter_mut() {
+        let path = entry.0.clone();
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM write_queue WHERE enqueued_at_ns >= ?1 AND path = ?2",
+                params![since_ns, path],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let failed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM failed_writes WHERE enqueued_at_ns >= ?1 AND path = ?2",
+                params![since_ns, path],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        entry.2 = entry.1 + queued + failed;
+    }
+    Ok(out)
+}
+
+/// Most-recent critical diff (id + observed_at_ns), if any.
+pub fn last_critical_diff(pool: &DbPool) -> Result<Option<(i64, i64)>> {
+    let conn = pool.lock();
+    let row = conn
+        .query_row(
+            "SELECT id, observed_at_ns FROM diffs
+              WHERE severity = 'critical'
+              ORDER BY observed_at_ns DESC LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .ok();
+    Ok(row)
+}
+
+/// True if shadow is currently in `degraded` state per K13. The scoreboard
+/// uses this to grey out the divergence-rate panels (when shadow is degraded
+/// the rate is meaningless: writes are dropping silently).
+pub fn shadow_degraded_now(pool: &DbPool) -> Result<bool> {
+    Ok(get_backend_state(pool, "shadow")?
+        .map(|s| s.state == "degraded")
+        .unwrap_or(false))
+}
+
 pub fn now_ns() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
