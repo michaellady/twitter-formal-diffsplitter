@@ -1,0 +1,66 @@
+# Tier-4 bootstrap CI gate. Mirrors the template at
+# https://github.com/michaellady/twitter-formal-spec/tree/main/.github/template-tier4-bootstrap
+#
+# Fails when:
+#   - TCB.md or CHANGELOG-tier4.md is missing
+#   - the PR head commit didn't append to CHANGELOG-tier4.md
+#
+# Skip rule: PRs labeled `dependencies` or authored by `dependabot[bot]` /
+# `renovate[bot]` are exempt from the changelog-append check.
+
+name: tier4-bootstrap-check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: tier4-bootstrap-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history to diff against base
+
+      - name: Verify required Tier-4 files exist
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -f TCB.md ] || missing+=("TCB.md")
+          [ -f CHANGELOG-tier4.md ] || missing+=("CHANGELOG-tier4.md")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required Tier-4 files: ${missing[*]}" >&2
+            exit 1
+          fi
+          echo "Required Tier-4 files present."
+
+      - name: Verify CHANGELOG-tier4.md was touched (PR only)
+        if: github.event_name == 'pull_request'
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: |
+          set -euo pipefail
+          case "$AUTHOR" in
+            dependabot[bot]|renovate[bot]|renovate-bot)
+              echo "Skipping changelog check for bot author: $AUTHOR"
+              exit 0
+              ;;
+          esac
+          if echo " $LABELS " | grep -q ' dependencies '; then
+            echo "Skipping changelog check (label 'dependencies')"
+            exit 0
+          fi
+
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if ! git diff --name-only "$BASE...HEAD" | grep -q '^CHANGELOG-tier4\.md$'; then
+            echo "::error::This PR did not modify CHANGELOG-tier4.md. Tier-4 PRs must append at least one line." >&2
+            echo "If this is a no-op PR, label it 'dependencies' to skip." >&2
+            exit 1
+          fi
+          echo "CHANGELOG-tier4.md was modified."
