@@ -251,14 +251,48 @@ pub struct DiffRow {
 }
 
 pub fn list_recent_diffs(pool: &DbPool, limit: i64) -> Result<Vec<DiffRow>> {
+    list_diffs_filtered(pool, limit, None, None)
+}
+
+/// List diffs ordered by `observed_at_ns DESC`, with optional filters used by
+/// the dashboard:
+///
+/// * `severity_eq` — exact severity match (`critical|high|medium|low|noise`).
+/// * `since_ns`    — only return rows with `observed_at_ns >= since_ns`.
+pub fn list_diffs_filtered(
+    pool: &DbPool,
+    limit: i64,
+    severity_eq: Option<&str>,
+    since_ns: Option<i64>,
+) -> Result<Vec<DiffRow>> {
     let conn = pool.lock();
-    let mut stmt = conn.prepare(
+    // Build SQL dynamically — only two well-known shapes; bind values with
+    // params to keep this injection-safe.
+    let mut sql = String::from(
         "SELECT id, observed_at_ns, method, path, primary_status, shadow_status,
                 diff_blob, severity, descended_from_failed_write_id
-           FROM diffs ORDER BY observed_at_ns DESC LIMIT ?1",
-    )?;
+           FROM diffs WHERE 1=1",
+    );
+    if severity_eq.is_some() {
+        sql.push_str(" AND severity = ?");
+    }
+    if since_ns.is_some() {
+        sql.push_str(" AND observed_at_ns >= ?");
+    }
+    sql.push_str(" ORDER BY observed_at_ns DESC LIMIT ?");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(s) = severity_eq {
+        bindings.push(rusqlite::types::Value::Text(s.to_string()));
+    }
+    if let Some(ns) = since_ns {
+        bindings.push(rusqlite::types::Value::Integer(ns));
+    }
+    bindings.push(rusqlite::types::Value::Integer(limit));
+
     let rows = stmt
-        .query_map(params![limit], |r| {
+        .query_map(rusqlite::params_from_iter(bindings.iter()), |r| {
             Ok(DiffRow {
                 id: r.get(0)?,
                 observed_at_ns: r.get(1)?,
@@ -273,6 +307,51 @@ pub fn list_recent_diffs(pool: &DbPool, limit: i64) -> Result<Vec<DiffRow>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// Full single-diff record (including bodies) for the drill-in page.
+#[derive(serde::Serialize)]
+pub struct DiffDetail {
+    pub id: i64,
+    pub observed_at_ns: i64,
+    pub method: String,
+    pub path: String,
+    pub primary_status: Option<i64>,
+    pub shadow_status: Option<i64>,
+    pub primary_body: Option<String>,
+    pub shadow_body: Option<String>,
+    pub diff_blob: String,
+    pub severity: String,
+    pub descended_from_failed_write_id: Option<i64>,
+}
+
+pub fn get_diff(pool: &DbPool, id: i64) -> Result<Option<DiffDetail>> {
+    let conn = pool.lock();
+    let row = conn
+        .query_row(
+            "SELECT id, observed_at_ns, method, path, primary_status, shadow_status,
+                    primary_body, shadow_body, diff_blob, severity,
+                    descended_from_failed_write_id
+               FROM diffs WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(DiffDetail {
+                    id: r.get(0)?,
+                    observed_at_ns: r.get(1)?,
+                    method: r.get(2)?,
+                    path: r.get(3)?,
+                    primary_status: r.get(4)?,
+                    shadow_status: r.get(5)?,
+                    primary_body: r.get(6)?,
+                    shadow_body: r.get(7)?,
+                    diff_blob: r.get(8)?,
+                    severity: r.get(9)?,
+                    descended_from_failed_write_id: r.get(10)?,
+                })
+            },
+        )
+        .ok();
+    Ok(row)
 }
 
 #[derive(Clone, Debug)]

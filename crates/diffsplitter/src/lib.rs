@@ -4,6 +4,7 @@
 //! the binary uses.
 
 pub mod config;
+pub mod dashboard;
 pub mod db;
 pub mod diff;
 pub mod metrics;
