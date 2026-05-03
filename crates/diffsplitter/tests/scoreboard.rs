@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use diffsplitter::config::Config;
-use diffsplitter::{db, scoreboard, State};
+use diffsplitter::{alerting, db, scoreboard, State};
 use http_body_util::BodyExt;
 use rusqlite::params;
 use tower::ServiceExt;
@@ -47,7 +47,15 @@ fn fresh_state() -> Arc<State> {
         diff_body_max_bytes: 4096,
     };
     let http = reqwest::Client::builder().build().expect("reqwest client");
-    Arc::new(State { cfg, http, pool })
+    let notifiers = Arc::new(alerting::NotifierSet {
+        notifiers: vec![Arc::new(alerting::LogNotifier)],
+    });
+    Arc::new(State {
+        cfg,
+        http,
+        pool,
+        notifiers,
+    })
 }
 
 fn router(state: Arc<State>) -> axum::Router {
