@@ -1,0 +1,84 @@
+# "verify" for the diffsplitter is "build, test, and produce a verified
+# image with K3 image-digest provenance". There's no Verus/TLC here — the
+# diffsplitter is trusted infrastructure, not verified code (see TCB.md).
+# Same two-pass image promotion pattern as the two backends so deploy.yml
+# can promote by digest.
+
+name: verify
+
+on:
+  push:
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  test:
+    name: verify / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets
+
+  build-image-pr:
+    name: build-image (PR validation only)
+    if: github.event_name == 'pull_request'
+    needs: [test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read   # K6: PR runs do NOT get write to GHCR
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Dockerfile builds (no push)
+        run: docker build -t verify-build-only:${{ github.sha }} .
+
+  build-image-main:
+    name: build-image + push to GHCR
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # K6: only main pushes can push images
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: "Build and push (pass 1: no version baked yet)"
+        id: push1
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:pre-${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            IMAGE_DIGEST=sha256:pending
+      - name: "Re-tag with version baked in (pass 2)"
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:git-${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            IMAGE_DIGEST=${{ steps.push1.outputs.digest }}
+      - name: Write digest artifact
+        run: echo "${{ steps.push.outputs.digest }}" > image-digest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ github.sha }}
+          path: image-digest.txt
+          retention-days: 14

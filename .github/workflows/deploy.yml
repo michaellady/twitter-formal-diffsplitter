@@ -1,0 +1,75 @@
+# Deploy verified image to Fly.io.
+# Triggered by the `verify` workflow completing successfully on main.
+# Enforces K3 image-digest promotion: deploy uses the EXACT digest verify
+# just pushed; never rebuilds from source.
+#
+# First-time setup: see DEPLOY.md.
+
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [verify]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  deploy:
+    name: deploy
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # NOT github.sha — workflow_run's github.sha can drift on rapid pushes.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Download verified image digest
+        uses: actions/download-artifact@v4
+        with:
+          name: image-digest-${{ github.event.workflow_run.head_sha }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+          repository: ${{ github.repository }}
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy verified image (no rebuild)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          DIGEST=$(cat image-digest.txt)
+          echo "Deploying ghcr.io/${{ github.repository }}@${DIGEST}"
+          flyctl deploy \
+            --app "${{ vars.FLY_APP }}" \
+            --image "ghcr.io/${{ github.repository }}@${DIGEST}" \
+            --strategy immediate \
+            --wait-timeout 5m
+
+      - name: "Post-deploy /version git_sha verification"
+        run: |
+          set -euo pipefail
+          # See twitter-formal-rust deploy.yml for why we verify git_sha and
+          # not image_digest (two-pass build, pass 2 cannot bake its own
+          # digest). git_sha is deterministic across both passes and across
+          # rebuilds, so this is the right equality to check.
+          EXPECTED="${{ github.event.workflow_run.head_sha }}"
+          for i in $(seq 1 12); do
+            ACTUAL=$(curl -fsS "https://${{ vars.FLY_APP }}.fly.dev/version" 2>/dev/null | jq -r .git_sha 2>/dev/null || echo "pending")
+            if [ "$ACTUAL" = "$EXPECTED" ]; then
+              echo "OK: /version.git_sha = $ACTUAL"
+              exit 0
+            fi
+            echo "/version.git_sha = $ACTUAL, want $EXPECTED (attempt $i/12)"
+            sleep 5
+          done
+          echo "::error::DEPLOY MISMATCH after 60s: expected git_sha $EXPECTED" >&2
+          exit 1
