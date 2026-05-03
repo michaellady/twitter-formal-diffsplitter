@@ -23,9 +23,8 @@ use axum::Router;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use rand::Rng;
-use serde_json::json;
 
-use crate::{db, diff, metrics, State};
+use crate::{dashboard, db, diff, metrics, State};
 
 pub fn router(state: Arc<State>) -> Router {
     Router::new()
@@ -36,8 +35,10 @@ pub fn router(state: Arc<State>) -> Router {
         // Anyone wanting the primary's /version can hit /version on the
         // primary directly; the proxied UI doesn't need it.
         .route("/version", get(local_version))
-        .route("/diffs.json", get(diffs_json))
         .route("/metrics", get(metrics_handler))
+        // Phase 2 dashboard: GET /diffs (HTML), /diffs/:id (HTML),
+        // /diffs.json (JSON, supersedes the old handler in this file).
+        .merge(dashboard::routes())
         .fallback(any(proxy_handler))
         .with_state(state)
 }
@@ -76,14 +77,6 @@ async fn metrics_handler(AxState(state): AxState<Arc<State>>) -> impl IntoRespon
         )],
         body,
     )
-}
-
-async fn diffs_json(AxState(state): AxState<Arc<State>>) -> impl IntoResponse {
-    let limit: i64 = 200;
-    match db::list_recent_diffs(&state.pool, limit) {
-        Ok(rows) => (StatusCode::OK, axum::Json(json!({ "diffs": rows }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")).into_response(),
-    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

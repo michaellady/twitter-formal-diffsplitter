@@ -15,6 +15,7 @@ expands the trust surface MUST add a row here.
 | `crates/diffsplitter/src/diff.rs` | Comparator (status + JSON-aware body diff, severity classifier, `/version` field masks) | Decides whether primary≠shadow is reported as a divergence; a bad mask hides real bugs, an over-strict diff cries wolf | Unit tests in `diff.rs`; deliberate-divergence smoke from DEPLOY.md |
 | `crates/diffsplitter/src/worker.rs` | Write-replay worker, version poller, K8/K12 resync orchestrator | Re-issues writes against the shadow with retry+backoff; on uptime regression drives the snapshot/load-snapshot dance | Crash-recovery: kill the proxy mid-replay, restart, observe queue drains |
 | `crates/diffsplitter/src/metrics.rs` | Prometheus counters (`diff_total`, `queue_depth`, `failed_writes_total`, `requests_total`) | Operators trust these to alert on shadow divergence; wrong counters hide regressions | Stable label cardinality (no per-path / per-user labels) |
+| `crates/diffsplitter/src/dashboard.rs` | `GET /diffs` (HTML), `GET /diffs/:id` (HTML drill-in), `GET /diffs.json` — server-rendered evidence dashboard with severity/since filters and K13 degraded-row styling | Read-only renderer over the existing `diffs` table; the only page humans use to triage divergences. A bug here can hide a real divergence (false negative) or misclassify a noise diff as critical (false positive). No auth; no `<script>`; HTML is escaped at render time. | `cargo test` (`tests/dashboard.rs`): index returns 200 with the expected columns, `/diffs/:nonexistent` returns 404, `/diffs.json` round-trips through SQLite, severity filter applied, bad input rejected with 400 |
 | `Dockerfile` | Builder + distroless final stage, image-digest provenance | Same K3 promotion pattern as the two backends; verify pushes a digest, deploy pulls by digest | `verify.yml` + `deploy.yml` workflows |
 | `fly.toml` | App config + 1GB persistent volume mount at `/data` | The SQLite write queue must be durable across machine restarts; the volume is the durability boundary | Fly volume snapshots; crash-recovery smoke |
 | `.github/workflows/{ci,verify,deploy}.yml` | CI gate, GHCR push, Fly deploy by digest | Image-digest provenance — only verified images can deploy | Workflow definitions reviewed in PR |
@@ -27,6 +28,7 @@ expands the trust surface MUST add a row here.
 - **Diff comparator:** `crates/diffsplitter/src/diff.rs`
 - **Resync orchestrator:** `crates/diffsplitter/src/worker.rs`
 - **Observability:** `crates/diffsplitter/src/metrics.rs`
+- **Evidence dashboard (read-only HTML):** `crates/diffsplitter/src/dashboard.rs`
 - **Deploy stack:** `Dockerfile`, `fly.toml`, `.github/workflows/*`
 
 ## What is *not* in this repo's TCB

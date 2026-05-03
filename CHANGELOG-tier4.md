@@ -11,6 +11,21 @@ The `tier4-bootstrap-check` CI gate enforces this.
 
 ### Added
 
+- Stream 2 Phase 2: server-rendered diffs dashboard. New module
+  `crates/diffsplitter/src/dashboard.rs` mounts three routes on the existing
+  axum router: `GET /diffs` (HTML — last 100 diffs sorted by
+  `observed_at_ns DESC`, columns: timestamp/method/path/primary status/shadow
+  status/severity/view), `GET /diffs/:id` (HTML drill-in with side-by-side
+  primary vs shadow body and the structured diff blob), and `GET /diffs.json`
+  (supersedes the placeholder Phase 1 handler — same data, JSON shape
+  `{"diffs":[...]}`). All three accept `?severity=critical|high|medium|low|noise`
+  and `?since=YYYY-MM-DD` (UTC) filters; bad filter input returns 400. Diffs
+  whose `descended_from_failed_write_id` is non-null are visually greyed out
+  with a "(degraded)" tag per K13 — they are caused by a known dropped write,
+  not a real cross-impl divergence. Pure server-rendered HTML (`format!`
+  strings + inline `<style>`); no JS framework, no external assets; typical
+  page weight ≈ 6-15KB, well under the 50KB budget enforced by an integration
+  test. No auth (single-developer demo posture, same as the backend UIs).
 - Stream 2 Phase 1: initial diffsplitter axum proxy. Single binary in
   `crates/diffsplitter`. Routes writes (POST /users, POST /tweets,
   POST /follow, DELETE /follow) through the primary, returns the primary's
